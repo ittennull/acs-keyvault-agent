@@ -29,6 +29,7 @@ import os
 import json
 import logging
 import base64
+import json
 
 from adal import AuthenticationContext
 from azure.keyvault import KeyVaultClient
@@ -119,22 +120,22 @@ class KeyVaultAgent(object):
         
         return self._secrets_list
 
-    def _create_kubernetes_secret_objects(self, key, value):
-        key = key.lower()
+    def _create_kubernetes_secret_objects(self, secretName, key, value):
+        secretName = secretName.lower()
         api_instance = self._get_kubernetes_api_instance()
         secret = client.V1Secret()
         encoded_secret = base64.b64encode(bytes(value))
 
-        secret.metadata = client.V1ObjectMeta(name=key)
+        secret.metadata = client.V1ObjectMeta(name=secretName)
         secret.type = "Opaque"
-        secret.data = { "secret" : encoded_secret }
+        secret.data = { key : encoded_secret }
 
         secrets_list = self._get_kubernetes_secrets_list()
 
-        _logger.info('Creating or updating Kubernetes Secret object: %s', key)
+        _logger.info('Creating or updating Kubernetes Secret object: %s', secretName)
         try:
-            if key in secrets_list:
-                api_instance.patch_namespaced_secret(name=key, namespace=self._secrets_namespace, body=secret)
+            if secretName in secrets_list:
+                api_instance.patch_namespaced_secret(name=secretName, namespace=self._secrets_namespace, body=secret)
             else:
                 api_instance.create_namespaced_secret(namespace=self._secrets_namespace, body=secret)
         except:
@@ -146,6 +147,7 @@ class KeyVaultAgent(object):
         """
         vault_base_url = os.getenv('VAULT_BASE_URL')
         secrets_keys = os.getenv('SECRETS_KEYS')
+        single_k8s_secret = os.getenv('SINGLE_KUBERNETES_SECRET')
         self._secrets_namespace = os.getenv('SECRETS_NAMESPACE','default')
 
         client = self._get_client()
@@ -159,12 +161,20 @@ class KeyVaultAgent(object):
             secrets_keys = ';'.join([secret.id.split('/')[-1] for secret in all_secrets])
 
         if secrets_keys is not None:
+            key_values = {}
             for key_info in filter(None, secrets_keys.split(';')):
                 key_name, key_version, cert_filename, key_filename = self._split_keyinfo(key_info)
                 _logger.info('Retrieving secret name:%s with version: %s output certFileName: %s keyFileName: %s', key_name, key_version, cert_filename, key_filename)
                 secret = client.get_secret(vault_base_url, key_name, key_version)
-                
-                self._create_kubernetes_secret_objects(key_name, secret.value)
+                key_values[key_name] = secret.value
+
+            if single_k8s_secret is not None:
+                dataWithReplacedSeparator = dict((k.replace("--", ":"), v) for k,v in key_values.items())
+                json_data = json.dumps(dataWithReplacedSeparator, indent=4)
+                self._create_kubernetes_secret_objects(single_k8s_secret, "appsettings.json", json_data)
+            else:
+                for k, v in key_value_pairs.items():
+                    self._create_kubernetes_secret_objects(k, "secret", v)
 
     def grab_secrets(self):
         """
